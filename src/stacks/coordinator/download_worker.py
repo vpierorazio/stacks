@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 from stacks.config.config import Config
 from stacks.constants import DOWNLOAD_PATH, PROJECT_ROOT
 from stacks.coordinator.queue_ops import QueueOperations
+from stacks.downloader.html import DEAD_MIRROR_DOMAINS, JS_SPA_MIRROR_DOMAINS
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +280,17 @@ def download_worker_process(
                     # Add remaining mirrors
                     for mirror in all_mirrors:
                         domain = _extract_domain(mirror.get('url', ''))
+
+                        # Skip known dead mirrors (permanently 5xx)
+                        if domain and any(domain == dead or domain.endswith('.' + dead) for dead in DEAD_MIRROR_DOMAINS):
+                            worker_logger.debug(f"Skipping known dead mirror: {domain}")
+                            continue
+
+                        # Skip known JS SPA mirrors (no static download links)
+                        if domain and any(domain == spa or domain.endswith('.' + spa) for spa in JS_SPA_MIRROR_DOMAINS):
+                            worker_logger.debug(f"Skipping JS SPA mirror (no static links): {domain}")
+                            continue
+
                         if domain and domain not in tried_domains:
                             mirrors_to_try.append(mirror)
                             tried_domains.add(domain)

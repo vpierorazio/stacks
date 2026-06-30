@@ -45,15 +45,25 @@ def download_from_mirror(d, mirror_url, mirror_type, md5, title=None, resume_att
                         d.status_callback("Extracting download link...")
 
                     download_link = d.parse_download_link_from_html(html_content, md5, mirror_url)
-                    if not download_link:
-                        d.logger.warning("Could not find download link")
-                        return None
+                    if download_link:
+                        if hasattr(d, 'status_callback'):
+                            d.status_callback("Downloading file...")
+                        d.logger.info("Found download URL via FlareSolverr, downloading...")
+                        return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
 
-                    if hasattr(d, 'status_callback'):
-                        d.status_callback("Downloading file...")
+                    # If the direct parse didn't find a link, the slow_download page might
+                    # contain the same download panel as the md5 page (Anna's Archive
+                    # structure change). Try parsing the download panel from this page.
+                    d.logger.debug("Direct parse failed on slow_download page, trying download panel parse...")
+                    download_link = _parse_slow_download_panel(d, html_content, md5, mirror_url)
+                    if download_link:
+                        if hasattr(d, 'status_callback'):
+                            d.status_callback("Downloading file...")
+                        d.logger.info("Found download URL via download panel parse, downloading...")
+                        return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
 
-                    d.logger.info("Found download URL via FlareSolverr, downloading...")
-                    return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
+                    d.logger.warning("Could not find download link")
+                    return None
 
                 response.raise_for_status()
 
@@ -61,15 +71,22 @@ def download_from_mirror(d, mirror_url, mirror_type, md5, title=None, resume_att
                     d.status_callback("Extracting download link...")
 
                 download_link = d.parse_download_link_from_html(response.text, md5, mirror_url)
-                if not download_link:
-                    d.logger.warning("Could not find download link")
-                    return None
+                if download_link:
+                    if hasattr(d, 'status_callback'):
+                        d.status_callback("Downloading file...")
+                    d.logger.info("Found download URL, downloading...")
+                    return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
 
-                if hasattr(d, 'status_callback'):
-                    d.status_callback("Downloading file...")
+                # Try parsing the download panel structure
+                download_link = _parse_slow_download_panel(d, response.text, md5, mirror_url)
+                if download_link:
+                    if hasattr(d, 'status_callback'):
+                        d.status_callback("Downloading file...")
+                    d.logger.info("Found download URL via download panel parse, downloading...")
+                    return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
 
-                d.logger.info("Found download URL, downloading...")
-                return d.download_direct(download_link, title=title, resume_attempts=resume_attempts, md5=md5, subfolder=subfolder)
+                d.logger.warning("Could not find download link")
+                return None
 
             except Exception as e:
                 d.logger.error(f"Error accessing slow_download page: {e}")
@@ -155,3 +172,87 @@ def download_from_mirror(d, mirror_url, mirror_type, md5, title=None, resume_att
     except Exception as e:
         d.logger.error(f"Error downloading from mirror: {e}")
         return None
+
+
+def _parse_slow_download_panel(d, html_content, md5, mirror_url):
+    """
+    Parse a slow_download page that contains a download panel (like the md5 page).
+
+    Anna's Archive changed its structure: the slow_download page now shows the same
+    download panel as the /md5/ page instead of directly serving the file. This parser
+    looks for download links inside that panel structure.
+
+    It tries multiple strategies:
+    1. Find links with the MD5 prefix (direct CDN links)
+    2. Find clipboard buttons or spans with download URLs
+    3. Find js-download-link elements that point to actual file downloads
+    """
+    from bs4 import BeautifulSoup
+    from urllib.parse import urljoin
+
+    soup = BeautifulSoup(html_content, 'html.parser')
+    md5_prefix = md5[:12]
+
+    # Strategy 1: Look for links in the downloads panel
+    panel = soup.find('div', id='md5-panel-downloads')
+    if panel:
+        # Look for links containing the MD5 that are NOT slow_download or fast_download
+        for a in panel.find_all('a', href=True):
+            href = a['href']
+            if md5_prefix in href.lower():
+                # Skip slow_download and fast_download pages — we need the actual file
+                if 'slow_download' in href.lower() or 'fast_download' in href.lower():
+                    continue
+                # Skip navigation links
+                if '/md5/' in href.lower():
+                    continue
+
+                # Resolve relative URLs
+                if not href.startswith('http'):
+                    href = urljoin(mirror_url, href)
+
+                d.logger.debug(f"Found download link in panel: {href}")
+                return href
+
+    # Strategy 2: Look for js-download-link elements with actual file URLs
+    # (not slow_download/fast_download navigation links)
+    for a in soup.find_all('a', class_='js-download-link', href=True):
+        href = a['href']
+        if 'slow_download' in href or 'fast_download' in href:
+            continue
+        if md5_prefix in href.lower():
+            if not href.startswith('http'):
+                href = urljoin(mirror_url, href)
+            d.logger.debug(f"Found js-download-link: {href}")
+            return href
+
+    # Strategy 3: Look for download URLs in any element (clipboard buttons, spans, etc.)
+    for btn in soup.find_all('button', onclick=True):
+        onclick = btn['onclick']
+        import re
+        match = re.search(r"writeText\('([^']+)'", onclick)
+        if match:
+            url = match.group(1)
+            if md5_prefix in url:
+                d.logger.debug(f"Found clipboard URL in panel page: {url}")
+                return url
+
+    for span in soup.find_all('span'):
+        text = span.get_text(strip=True)
+        if text.startswith("http") and md5_prefix in text:
+            d.logger.debug(f"Found raw URL in span on panel page: {text}")
+            return text
+
+    # Strategy 4: Look for any link with a file extension that might be a direct download
+    from stacks.constants import LEGAL_FILES
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if any(ext in href.lower() for ext in LEGAL_FILES):
+            if not href.startswith('http'):
+                href = urljoin(mirror_url, href)
+            # Verify it's not just a navigation link
+            if md5_prefix in href.lower() or 'cdn' in href.lower():
+                d.logger.debug(f"Found file link on panel page: {href}")
+                return href
+
+    return None
