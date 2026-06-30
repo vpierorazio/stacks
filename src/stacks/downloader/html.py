@@ -322,13 +322,12 @@ def _get_download_links_single_domain(d, md5, domain):
                 href = a['href']
 
                 # Handle IPFS download links (relative URLs on Anna's Archive)
-                if href.startswith('/ipfs_downloads/') and mirror_url is None:
+                if href.startswith('/ipfs_downloads/'):
                     # Convert relative IPFS link to absolute URL using the current domain
                     full_ipfs_url = urljoin(url, href)
-                    ipfs_domain = domain
                     links.append({
                         'url': full_ipfs_url,
-                        'domain': ipfs_domain,
+                        'domain': domain,
                         'text': 'IPFS',
                         'type': 'slow_download'  # IPFS is also behind DDoS-Guard
                     })
